@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>简单的webrtc通信</title>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                房间号:
+                <input type="text" id="room">
+                <button onclick="createRoom()">创建房间</button>
+            </div>
+            <div>
+                对方房间号
+                <input type="text" id="receive">
+                <button onclick="Connect()">连接</button>
+            </div>
+        </div>
+        <div style="margin-top: 20px;">
+            <video src="" id="self" autoplay controls muted
+                style="width: 500px;object-fit: cover;margin-right: 100px;"></video>
+            <video src="" id="other" autoplay controls muted style="width: 500px;object-fit: cover;"> </video>
+        </div>
+    </div>
+</body>
+<script>
+    let PeerConnection =
+        window.PeerConnection ||
+        window.webkitPeerConnection00 ||
+        window.webkitRTCPeerConnection ||
+        window.mozRTCPeerConnection;
+    let nativeRTCIceCandidate =
+        window.mozRTCIceCandidate || window.RTCIceCandidate;
+    let nativeRTCSessionDescription =
+        window.mozRTCSessionDescription || window.RTCSessionDescription;
+    //ice服务器地址
+    const iceServer = {
+        iceServers: [
+            {
+                url: "turn:42.192.40.58:3478?transport=udp",
+                username: "ddssingsong",
+                credential: "123456",
+            },
+            {
+                url: "turn:42.192.40.58:3478?transport=tcp",
+                username: "ddssingsong",
+                credential: "123456",
+            },
+        ],
+    };
+    let socket = ''
+    let receiver = ''
+    let pc
+    function createRoom() {
+        let room = document.getElementById("room");
+        if (!room.value) {
+            alert("请输入房间号!!!")
+            return
+        }
+        //建立websocket连接
+        socket = new WebSocket(`wss://127.0.0.1:3000/single?room=${room.value}`)
+        socket.onopen = async () => {
+            alert("连接成功")
+            try {
+                //获取当前设备的视频流
+                let stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+                //初始化PC源
+                pc = initPC(stream)
+                //添加音视频流
+                pc.addStream(stream)
+                let video = document.getElementById('self')
+                video.srcObject = stream
+            } catch (error) {
+                console.log(error);
+                alert("获取流失败")
+            }
+        }
+        socket.onmessage = async (message) => {
+            let data = JSON.parse(message.data)
+            switch (data.name) {
+                //接收到邀请
+                case "peer":
+                    receiver = data.receiver
+                    acceptAudio()
+                    break
+                /**
+                    * 1.邀请人将对方的音视频流通过setRemoteDescription函数进行存储
+                    * 2.存储完后邀请人创建answer来获取自己的音视频流,通过setLocalDescription函数存储自己的音视频流,并发送answer指令(携带自己的音视频)告诉对方要存储邀请人的音视频
+                */
+                case "offer":
+                    //当收到对方接收请求后,设置音频源,并发送answer给对方
+                    pc.setRemoteDescription(new nativeRTCSessionDescription(data.data.sdp));
+                    pc.createAnswer((session_desc) => {
+                        pc.setLocalDescription(session_desc);
+                        socket.send(
+                            JSON.stringify({
+                                name: "answer",
+                                data: {
+                                    sdp: session_desc,
+                                },
+                                receiver: receiver,
+                            })
+                        )
+
+                    }, (err) => {
+                        console.log(err);
+                    })
+                    break;
+                case "answer":
+                    //设置邀请人发来的音频源
+                    pc.setRemoteDescription(new nativeRTCSessionDescription(data.data.sdp));
+                    break;
+                case "ice_candidate":
+                    //添加ice源,这一步很重要,如果没有接收ice则查看是否流程有问题
+                    var candidate = new nativeRTCIceCandidate(data.data);
+                    pc.addIceCandidate(candidate);
+                    break;
+            }
+        }
+    }
+    //初始化PC源
+    function initPC() {
+        let pc = new PeerConnection(iceServer);
+        pc.onicecandidate = (evt) => {
+            if (evt.candidate) {
+                socket.send(
+                    JSON.stringify({
+                        name: `ice_candidate`,
+                        data: {
+                            id: evt.candidate.sdpMid,
+                            label: evt.candidate.sdpMLineIndex,
+                            sdpMLineIndex: evt.candidate.sdpMLineIndex,
+                            candidate: evt.candidate.candidate,
+                        },
+                        receiver: receiver,
+                    })
+                );
+            }
+        };
+        pc.onaddstream = (evt) => {
+            let stream = evt.stream
+            let video = document.getElementById('other')
+            video.srcObject = stream
+        };
+        return pc
+    }
+    //和对方建立连接
+    function Connect() {
+        receiver = document.getElementById("receive").value
+        if (!socket) {
+            alert("先创建自己的房间号!!")
+            return
+        }
+        if (!receiver) {
+            alert("请输入对方房间号")
+            return
+        }
+        socket.send(JSON.stringify({ name: "createRoom", receiver: receiver }))
+    }
+    //接收邀请
+    async function acceptAudio() {
+        /**
+         * 1.点击同意后
+         * 2.获取自己的视频流
+         * 3.初始化PC源
+         * 4.PC添加音视频流
+         * 5.创建offer,获取自己的音视频流,并通过setLocalDescription函数存储自己的音视频流
+         * 6.并发送peer指令(携带自己的音视频)告诉邀请人要存储自己的音视频
+         */
+        try {
+            pc.createOffer((session_desc) => {
+                pc.setLocalDescription(session_desc);
+                socket.send(
+                    JSON.stringify({
+                        name: "offer",
+                        data: {
+                            sdp: session_desc,
+                        },
+                        receiver: receiver,
+                    })
+                )
+            }, (err) => {
+                console.log(err);
+            });
+        } catch (error) {
+            alert("检测到当前设备不支持麦克风,请设置权限后在重试")
+            this.socket.close()
+        }
+    }
+</script>
+<style>
+    .header {
+        width: 1000px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+</style>
+
+</html>
